@@ -1,0 +1,266 @@
+package controllers
+{
+
+    import flash.display.BitmapData;
+    import flash.display.JPEGEncoderOptions;
+    import flash.display.Loader;
+    import flash.display.LoaderInfo;
+    import flash.display.Sprite;
+    import flash.events.Event;
+    import flash.events.IEventDispatcher;
+    import flash.events.MediaEvent;
+    import flash.filesystem.File;
+    import flash.filesystem.FileMode;
+    import flash.filesystem.FileStream;
+    import flash.geom.Matrix;
+    import flash.geom.Rectangle;
+    import flash.media.CameraUI;
+    import flash.media.MediaPromise;
+    import flash.media.MediaType;
+    import flash.utils.ByteArray;
+    import flash.utils.IDataInput;
+
+    import mx.utils.Base64Encoder;
+
+    import classes.APIupload;
+
+
+    public class SnapshotController
+    {
+        private var cameraUI:CameraUI = new CameraUI();
+        private var dataSource:IDataInput; 
+        private var tempDir:File = new File();
+        private var imageOrientation:int = 0 ;
+
+
+        public function SnapshotController()
+        {
+
+        }
+
+        public function LaunchCameraUI():void
+        {
+
+            if( CameraUI.isSupported ) {
+                trace( "Initializing camera..." ); 
+                cameraUI.addEventListener( MediaEvent.COMPLETE, imageSelected ); 
+                cameraUI.launch( MediaType.IMAGE ); 
+            } else {
+                trace( "CameraUI is not supported."); 
+            }
+        }
+
+        private function imageSelected( event:MediaEvent ):void {
+            trace( "Media selected..." ); 
+            var imagePromise:MediaPromise = event.data; 
+
+
+            dataSource = imagePromise.open(); 
+            if( imagePromise.isAsync ) {
+                trace( "Asynchronous media promise." ); 
+                var eventSource:IEventDispatcher = dataSource as IEventDispatcher; 
+                eventSource.addEventListener( Event.COMPLETE, onMediaLoaded );
+            } else {
+                trace( "Synchronous media promise." ); 
+                readMediaData(); 
+            }
+        } 
+        private function onMediaLoaded( event:Event ):void {
+            trace("Media load complete"); 
+            readMediaData();
+        } 
+
+        private function readMediaData():void { 
+            var imageBytes:ByteArray = new ByteArray(); 
+            dataSource.readBytes( imageBytes );
+
+            imageOrientation = getOrientation(imageBytes);
+
+            //saveImageFile(imageBytes);
+            //Saving this byteArray will save a big file with the EXIF in it.
+
+            var loader:Loader = new Loader();
+            loader.contentLoaderInfo.addEventListener(Event.INIT, onMediaPromiseLoaded);
+            loader.loadBytes(imageBytes);
+
+        } 
+
+
+        private function onMediaPromiseLoaded(e:Event):void
+        {
+            trace("Media file loaded");
+            var base64Enc:Base64Encoder = new Base64Encoder();
+            var mpLoaderInfo:LoaderInfo = e.target as LoaderInfo;
+            mpLoaderInfo.removeEventListener(Event.COMPLETE, onMediaPromiseLoaded);
+
+            var scale:Number = 0.25;
+            var matrix:Matrix = new Matrix();
+            matrix.scale(scale, scale);
+
+
+            var jpgQuality:int = 80;
+
+
+            var bmd:BitmapData = new BitmapData(mpLoaderInfo.width*scale, mpLoaderInfo.height*scale);
+            bmd.draw(mpLoaderInfo.content,matrix,null,null,null,true);  
+
+            var rotatedBMD:BitmapData = rotateBitmapData(bmd, imageOrientation);
+            var bytes:ByteArray = rotatedBMD.encode(new Rectangle(0,0, rotatedBMD.width , rotatedBMD.height), new JPEGEncoderOptions(jpgQuality), bytes);
+
+
+
+
+            saveImageFile(bytes); //this is the smaller file saved. it does not have EXIF data but you can write your own using AS3 eXIF class.
+
+        } 
+
+        private function rotateBitmapData( bitmapData:BitmapData, degree:int = 0 ) :BitmapData
+        {
+            var newBitmap:BitmapData;
+            var matrix:Matrix = new Matrix();
+            matrix.rotate( degree * (Math.PI / 180)  );
+
+            if ( degree == 90 ) {
+                newBitmap = new BitmapData( bitmapData.height, bitmapData.width, true );
+                matrix.translate( bitmapData.height, 0 );
+            } else if ( degree == -90 || degree == 270) {
+                newBitmap = new BitmapData( bitmapData.height, bitmapData.width, true );
+                matrix.translate( 0, bitmapData.width );
+            } else if ( degree == 180 ) {
+                newBitmap = new BitmapData( bitmapData.width, bitmapData.height, true );
+                matrix.translate( bitmapData.width, bitmapData.height );
+            }else if(degree == 0){
+                newBitmap = new BitmapData( bitmapData.width, bitmapData.height, true );
+                //matrix.translate( bitmapData.width, bitmapData.height );
+            }
+
+            newBitmap.draw( bitmapData, matrix, null, null, null, true )
+            return newBitmap;
+        }
+
+        private function saveImageFile(ba:ByteArray):void{
+            var now:Date = new Date(); 
+            var filename:String = "IMG" + now.fullYear + now.month + now.day + now.hours + now.minutes + now.seconds + ".jpg";
+            var temp:File = File.documentsDirectory.resolvePath( filename );
+            var stream:FileStream = new FileStream(); 
+            stream.open( temp, FileMode.WRITE ); 
+            stream.writeBytes( ba ); 
+            stream.close();
+        }
+
+
+
+        private function getOrientation(jpeg:ByteArray):int{
+            if (jpeg == null) {
+                return 0;
+            }
+            var offset:int = 0;
+            var length:int = 0;
+
+
+            while (offset + 3 < jpeg.length && (jpeg[offset++] & 0xFF) == 0xFF) {
+                var marker:int = jpeg[offset] & 0xFF;
+
+                // Check if the marker is a padding.
+                if (marker == 0xFF) {
+                    continue;
+                }
+                offset++;
+
+                // Check if the marker is SOI or TEM.
+                if (marker == 0xD8 || marker == 0x01) {
+                    continue;
+                }
+                // Check if the marker is EOI or SOS.
+                if (marker == 0xD9 || marker == 0xDA) {
+                    break;
+                }
+
+                // Get the length and check if it is reasonable.
+                length = pack(jpeg, offset, 2, false);
+                if (length < 2 || offset + length > jpeg.length) {
+                    trace("Invalid length");
+                    return 0;
+                }
+
+                // Break if the marker is EXIF in APP1.
+                if (marker == 0xE1 && length >= 8 &&
+                    pack(jpeg, offset + 2, 4, false) == 0x45786966 &&
+                    pack(jpeg, offset + 6, 2, false) == 0) {
+                    offset += 8;
+                    length -= 8;
+                    break;
+                }
+
+                // Skip other markers.
+                offset += length;
+                length = 0;
+            }
+
+            if (length > 8) {
+                // Identify the byte order.
+                var tag:int = pack(jpeg, offset, 4, false);
+                if (tag != 0x49492A00 && tag != 0x4D4D002A) {
+                    trace("Invalid byte order");
+                    return 0;
+                }
+                var littleEndian:Boolean = (tag == 0x49492A00);
+
+                // Get the offset and check if it is reasonable.
+                var count:int = pack(jpeg, offset + 4, 4, littleEndian) + 2;
+                if (count < 10 || count > length) {
+                    trace( "Invalid offset");
+                    return 0;
+                }
+                offset += count;
+                length -= count;
+
+                // Get the count and go through all the elements.
+                count = pack(jpeg, offset - 2, 2, littleEndian);
+                while (count-- > 0 && length >= 12) {
+                    // Get the tag and check if it is orientation.
+                    tag = pack(jpeg, offset, 2, littleEndian);
+                    if (tag == 0x0112) {
+                        // We do not really care about type and count, do we?
+                        var orientation:int = pack(jpeg, offset + 8, 2, littleEndian);
+                        switch (orientation) {
+                            case 1:
+                                return 0;
+                            case 3:
+                                return 180;
+                            case 6:
+                                return 90;
+                            case 8:
+                                return 270;
+                        }
+                        trace( "Unsupported orientation");
+                        return 0;
+                    }
+                    offset += 12;
+                    length -= 12;
+                }
+            }
+
+            trace( "Orientation not found");
+            return 0;
+
+        }
+
+        private function pack(bytes:ByteArray,offset:int,length:int,
+                              littleEndian:Boolean):int {
+            var step:int = 1;
+            if (littleEndian) {
+                offset += length - 1;
+                step = -1;
+            }
+
+            var value:int = 0;
+            while (length-- > 0) {
+                value = (value << 8) | (bytes[offset] & 0xFF);
+                offset += step;
+            }
+            return value;
+        }
+
+    }
+}
